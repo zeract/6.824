@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io/ioutil"
@@ -58,6 +59,15 @@ func Worker(mapf func(string, string) []KeyValue,
 		file.Close()
 		kva := mapf(reply.filename, string(content))
 		// intermediate = append(intermediate, kva...)
+
+		enc := json.NewEncoder(file)
+		for _, kv := range kva {
+			err := enc.Encode(kv)
+			if err != nil {
+				log.Fatalf("Write file fail!")
+			}
+		}
+
 	} else {
 		log.Fatalf("cannot alloc a map task for worker")
 	}
