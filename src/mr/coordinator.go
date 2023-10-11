@@ -12,9 +12,10 @@ import (
 type Coordinator struct {
 	// Your definitions here.
 	workers      []int
-	map_tasks    []int // 0 for idle, 1 for in-progress, 2 for completed
-	reduce_tasks []int
-	mutex        sync.Mutex
+	map_tasks    []int      // 0 for idle, 1 for in-progress, 2 for completed
+	reduce_tasks []int      // 0 for idle, 1 for in-progress, 2 for completed
+	filenames    []string   // store the filenames of input files
+	mutex        sync.Mutex // mutex for coordinator and rpc
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -29,15 +30,31 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	return nil
 }
 
+//
+// alloc map or reduce task for worker and change the state of master data structure
+//
 func (c *Coordinator) Alloc(args *Args, reply *Reply) error {
 	c.mutex.Lock()
 	for i := 0; i < len(c.map_tasks); i++ {
 		if c.map_tasks[i] == 0 {
+			// the map task i is allocated to worker
 			c.map_tasks[i] = 1
+
+			// the worker state is changed to in-progress
 			c.workers[args.number] = 1
-			// reply.filename =
+
+			// pass the filename to reply data structure
+			reply.filename = c.filenames[i]
 		}
 	}
+	defer c.mutex.Unlock()
+	return nil
+}
+
+func (c *Coordinator) Finish(args *Args, reply *Reply) error {
+	c.mutex.Lock()
+	c.map_tasks[args.number] = 2
+
 	defer c.mutex.Unlock()
 	return nil
 }
@@ -69,7 +86,21 @@ func (c *Coordinator) Done() bool {
 	ret := true
 
 	// Your code here.
-	c.mutex.Unlock()
+	for i := 0; i < len(c.map_tasks); i++ {
+		if c.map_tasks[i] == 2 {
+			ret = ret || true
+		} else {
+			ret = ret || false
+		}
+	}
+	for i := 0; i < len(c.reduce_tasks); i++ {
+		if c.reduce_tasks[i] == 2 {
+			ret = ret || true
+		} else {
+			ret = ret || false
+		}
+	}
+	defer c.mutex.Unlock()
 	return ret
 }
 
@@ -80,7 +111,17 @@ func (c *Coordinator) Done() bool {
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
-
+	// initialize map, reduce and filenames
+	c.map_tasks = make([]int, len(files))
+	c.filenames = make([]string, len(files))
+	c.reduce_tasks = make([]int, nReduce)
+	for i := 0; i < len(files); i++ {
+		c.map_tasks[i] = 0
+		c.filenames[i] = files[i]
+	}
+	for i := 0; i < nReduce; i++ {
+		c.reduce_tasks[i] = 0
+	}
 	// Your code here.
 
 	c.server()
