@@ -65,8 +65,8 @@ func (c *Coordinator) Alloc(args *Args, reply *Reply) error {
 	// if all map tasks not all done, the request for reduce need issue
 	for {
 		map_done := true
-		for i := 0; i < c.NMap; i++ {
-			if c.map_tasks[i] != 2 {
+		for _, m := range c.map_tasks {
+			if m != 2 {
 				map_done = false
 			}
 		}
@@ -99,8 +99,8 @@ func (c *Coordinator) Alloc(args *Args, reply *Reply) error {
 	}
 	for {
 		reduce_done := true
-		for i := 0; i < c.NReduce; i++ {
-			if c.reduce_tasks[i] != 2 {
+		for _, r := range c.reduce_tasks {
+			if r != 2 {
 				reduce_done = false
 			}
 		}
@@ -183,6 +183,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.NReduce = nReduce
 	c.NMap = len(files)
 	c.isDone = false
+	c.cond = *sync.NewCond(&c.mutex) // forget to initialize
 	for i := 0; i < len(files); i++ {
 		c.map_tasks[i] = 0
 		c.filenames[i] = files[i]
