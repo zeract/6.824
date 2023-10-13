@@ -11,11 +11,14 @@ import (
 
 type Coordinator struct {
 	// Your definitions here.
-	workers      []int
+	NReduce      int
+	NMap         int
 	map_tasks    []int      // 0 for idle, 1 for in-progress, 2 for completed
 	reduce_tasks []int      // 0 for idle, 1 for in-progress, 2 for completed
 	filenames    []string   // store the filenames of input files
 	mutex        sync.Mutex // mutex for coordinator and rpc
+	cond         sync.Cond  // conditional variable for issue request
+	isDone       bool       // all tasks is done
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -35,27 +38,102 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 //
 func (c *Coordinator) Alloc(args *Args, reply *Reply) error {
 	c.mutex.Lock()
-	for i := 0; i < len(c.map_tasks); i++ {
+	defer c.mutex.Unlock()
+	// look for map task
+	for i := 0; i < c.NMap; i++ {
 		if c.map_tasks[i] == 0 {
 			// the map task i is allocated to worker
 			c.map_tasks[i] = 1
 
-			// the worker state is changed to in-progress
-			c.workers[args.number] = 1
-
 			// pass the filename to reply data structure
-			reply.filename = c.filenames[i]
+			reply.Filename = c.filenames[i]
+
+			// pass the task number
+			reply.TaskNumber = i
+
+			// pass the task type, 0 for map task, 1 for reduce task
+			reply.TaskType = 0
+
+			// pass the map num
+			reply.NMap = c.NMap
+
+			// pass the reduce num
+			reply.NReduce = c.NReduce
+			return nil
 		}
 	}
-	defer c.mutex.Unlock()
+	// if all map tasks not all done, the request for reduce need issue
+	for {
+		map_done := true
+		for i := 0; i < c.NMap; i++ {
+			if c.map_tasks[i] != 2 {
+				map_done = false
+			}
+		}
+		if !map_done {
+			c.cond.Wait()
+		} else {
+			break
+		}
+	}
+
+	// look for reduce task
+	for i := 0; i < c.NReduce; i++ {
+		if c.reduce_tasks[i] == 0 {
+			// the reduce task i is allocated to worker
+			c.reduce_tasks[i] = 1
+
+			// pass the task type
+			reply.TaskType = 1
+
+			// pass the task number
+			reply.TaskNumber = i
+
+			// pass the map num
+			reply.NMap = c.NMap
+
+			// pass the reduce num
+			reply.NReduce = c.NReduce
+			return nil
+		}
+	}
+	for {
+		reduce_done := true
+		for i := 0; i < c.NReduce; i++ {
+			if c.reduce_tasks[i] != 2 {
+				reduce_done = false
+			}
+		}
+		if !reduce_done {
+			c.cond.Wait()
+		} else {
+			break
+		}
+	}
+	reply.TaskType = 2
+	c.isDone = true
+
 	return nil
 }
 
-func (c *Coordinator) Finish(args *Args, reply *Reply) error {
+func (c *Coordinator) Finish(args *FinishArgs, reply *FinishReply) error {
 	c.mutex.Lock()
-	c.map_tasks[args.number] = 2
-
 	defer c.mutex.Unlock()
+	// 0 is map task finish
+	if args.FinishType == 0 {
+		// change the map task state to finish
+		c.map_tasks[args.Number] = 2
+
+	} else {
+		// 1 is reduce task finish
+
+		// change the reduce task state to finish
+		c.reduce_tasks[args.Number] = 2
+
+	}
+
+	// Broadcast for all issue requests
+	c.cond.Broadcast()
 	return nil
 }
 
@@ -64,6 +142,7 @@ func (c *Coordinator) Finish(args *Args, reply *Reply) error {
 //
 func (c *Coordinator) server() {
 	c.mutex.Lock()
+	defer c.mutex.Unlock()
 	rpc.Register(c)
 	rpc.HandleHTTP()
 	//l, e := net.Listen("tcp", ":1234")
@@ -74,7 +153,7 @@ func (c *Coordinator) server() {
 		log.Fatal("listen error:", e)
 	}
 	go http.Serve(l, nil)
-	c.mutex.Unlock()
+
 }
 
 //
@@ -83,25 +162,8 @@ func (c *Coordinator) server() {
 //
 func (c *Coordinator) Done() bool {
 	c.mutex.Lock()
-	ret := true
-
-	// Your code here.
-	for i := 0; i < len(c.map_tasks); i++ {
-		if c.map_tasks[i] == 2 {
-			ret = ret || true
-		} else {
-			ret = ret || false
-		}
-	}
-	for i := 0; i < len(c.reduce_tasks); i++ {
-		if c.reduce_tasks[i] == 2 {
-			ret = ret || true
-		} else {
-			ret = ret || false
-		}
-	}
 	defer c.mutex.Unlock()
-	return ret
+	return c.isDone
 }
 
 //
@@ -111,10 +173,16 @@ func (c *Coordinator) Done() bool {
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
+
+	// Your code here.
+
 	// initialize map, reduce and filenames
 	c.map_tasks = make([]int, len(files))
 	c.filenames = make([]string, len(files))
 	c.reduce_tasks = make([]int, nReduce)
+	c.NReduce = nReduce
+	c.NMap = len(files)
+	c.isDone = false
 	for i := 0; i < len(files); i++ {
 		c.map_tasks[i] = 0
 		c.filenames[i] = files[i]
@@ -122,7 +190,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	for i := 0; i < nReduce; i++ {
 		c.reduce_tasks[i] = 0
 	}
-	// Your code here.
 
 	c.server()
 	return &c
