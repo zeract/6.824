@@ -7,18 +7,21 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type Coordinator struct {
 	// Your definitions here.
-	NReduce      int
-	NMap         int
-	map_tasks    []int      // 0 for idle, 1 for in-progress, 2 for completed
-	reduce_tasks []int      // 0 for idle, 1 for in-progress, 2 for completed
-	filenames    []string   // store the filenames of input files
-	mutex        sync.Mutex // mutex for coordinator and rpc
-	cond         sync.Cond  // conditional variable for issue request
-	isDone       bool       // all tasks is done
+	NReduce           int
+	NMap              int
+	map_tasks         []int       // 0 for idle, 1 for in-progress, 2 for completed
+	map_tasks_time    []time.Time // record the map task start time
+	reduce_tasks      []int       // 0 for idle, 1 for in-progress, 2 for completed
+	reduce_tasks_time []time.Time // record the reduce task start time
+	filenames         []string    // store the filenames of input files
+	mutex             sync.Mutex  // mutex for coordinator and rpc
+	cond              sync.Cond   // conditional variable for issue request
+	isDone            bool        // all tasks is done
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -39,69 +42,84 @@ func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 func (c *Coordinator) Alloc(args *Args, reply *Reply) error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	// look for map task
-	for i := 0; i < c.NMap; i++ {
-		if c.map_tasks[i] == 0 {
-			// the map task i is allocated to worker
-			c.map_tasks[i] = 1
 
-			// pass the filename to reply data structure
-			reply.Filename = c.filenames[i]
-
-			// pass the task number
-			reply.TaskNumber = i
-
-			// pass the task type, 0 for map task, 1 for reduce task
-			reply.TaskType = 0
-
-			// pass the map num
-			reply.NMap = c.NMap
-
-			// pass the reduce num
-			reply.NReduce = c.NReduce
-			return nil
-		}
-	}
 	// if all map tasks not all done, the request for reduce need issue
 	for {
+		// look for map task
+		for i := 0; i < c.NMap; i++ {
+
+			if c.map_tasks[i] == 0 || (c.map_tasks[i] == 1 && time.Since(c.map_tasks_time[i]).Seconds() > 10) {
+				// the map task i is allocated to worker
+				c.map_tasks[i] = 1
+
+				// record the start time
+				c.map_tasks_time[i] = time.Now()
+
+				// pass the filename to reply data structure
+				reply.Filename = c.filenames[i]
+
+				// pass the task number
+				reply.TaskNumber = i
+
+				// pass the task type, 0 for map task, 1 for reduce task
+				reply.TaskType = 0
+
+				// pass the map num
+				reply.NMap = c.NMap
+
+				// pass the reduce num
+				reply.NReduce = c.NReduce
+				// fmt.Printf("Alloc map task %d\n", i)
+				return nil
+			}
+
+		}
 		map_done := true
 		for _, m := range c.map_tasks {
 			if m != 2 {
 				map_done = false
+				break
 			}
 		}
 		if !map_done {
+			// fmt.Printf("worker wait!\n")
 			c.cond.Wait()
 		} else {
 			break
 		}
+		// fmt.Printf("Next loop!\n")
 	}
-
-	// look for reduce task
-	for i := 0; i < c.NReduce; i++ {
-		if c.reduce_tasks[i] == 0 {
-			// the reduce task i is allocated to worker
-			c.reduce_tasks[i] = 1
-
-			// pass the task type
-			reply.TaskType = 1
-
-			// pass the task number
-			reply.TaskNumber = i
-
-			// pass the map num
-			reply.NMap = c.NMap
-
-			// pass the reduce num
-			reply.NReduce = c.NReduce
-			return nil
-		}
-	}
+	// fmt.Printf("Got in reduce phase\n")
 	for {
+		// look for reduce task
+		for i := 0; i < c.NReduce; i++ {
+			if c.reduce_tasks[i] == 0 || (c.reduce_tasks[i] == 1 && time.Since(c.reduce_tasks_time[i]).Seconds() > 10) {
+				// the reduce task i is allocated to worker
+				c.reduce_tasks[i] = 1
+
+				// record the start time
+				c.reduce_tasks_time[i] = time.Now()
+
+				// pass the task type
+				reply.TaskType = 1
+
+				// pass the task number
+				reply.TaskNumber = i
+
+				// pass the map num
+				reply.NMap = c.NMap
+
+				// pass the reduce num
+				reply.NReduce = c.NReduce
+				// fmt.Printf("Alloc reduce task %d\n", i)
+				return nil
+			}
+		}
 		reduce_done := true
 		for _, r := range c.reduce_tasks {
 			if r != 2 {
 				reduce_done = false
+				break
 			}
 		}
 		if !reduce_done {
@@ -110,6 +128,7 @@ func (c *Coordinator) Alloc(args *Args, reply *Reply) error {
 			break
 		}
 	}
+
 	reply.TaskType = 2
 	c.isDone = true
 
@@ -178,19 +197,25 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	// initialize map, reduce and filenames
 	c.map_tasks = make([]int, len(files))
+	c.map_tasks_time = make([]time.Time, len(files))
 	c.filenames = make([]string, len(files))
 	c.reduce_tasks = make([]int, nReduce)
+	c.reduce_tasks_time = make([]time.Time, nReduce)
 	c.NReduce = nReduce
 	c.NMap = len(files)
 	c.isDone = false
 	c.cond = *sync.NewCond(&c.mutex) // forget to initialize
-	for i := 0; i < len(files); i++ {
-		c.map_tasks[i] = 0
-		c.filenames[i] = files[i]
-	}
-	for i := 0; i < nReduce; i++ {
-		c.reduce_tasks[i] = 0
-	}
+	c.filenames = files
+
+	go func() {
+		for {
+			c.mutex.Lock()
+			c.cond.Broadcast()
+			// fmt.Printf("Second Broadcast!\n")
+			c.mutex.Unlock()
+			time.Sleep(time.Second)
+		}
+	}()
 
 	c.server()
 	return &c
