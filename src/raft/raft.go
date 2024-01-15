@@ -150,13 +150,30 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
-	Term        int // currentTerm, for candidate to update itself
-	VoteGranted int // true means candidate received vote
+	Term        int  // currentTerm, for candidate to update itself
+	VoteGranted bool // true means candidate received vote
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
+	// Reply false if term < currentTerm
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.VoteGranted = false
+	} else {
+		// If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
+		if rf.votedFor == nil || *(rf.votedFor) == args.CandidateId {
+			if args.LastLogTerm > rf.currentTerm || (args.LastLogTerm == rf.currentTerm && args.LastLogIndex >= rf.lastApplied) {
+				*rf.votedFor = args.CandidateId
+				reply.Term = rf.currentTerm
+				reply.VoteGranted = true
+			}
+
+		}
+	}
+
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -237,7 +254,7 @@ func (rf *Raft) ticker() {
 
 		// Your code here (2A)
 		// Check if a leader election should be started.
-		Debug(dTimer, "S%d Leader, checking heartbeats", rf.me)
+		// Debug(dTimer, "S%d Leader, checking heartbeats", rf.me)
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -263,6 +280,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 
 	// Your initialization code here (2A, 2B, 2C).
+	rf.currentTerm = 0
+	rf.votedFor = nil
+	rf.commitIndex = 0
+	rf.lastApplied = 0
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
