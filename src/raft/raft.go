@@ -19,6 +19,7 @@ package raft
 
 import (
 	//	"bytes"
+
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -67,6 +68,7 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+	// paper defined
 	currentTerm int        // latest term server has seen
 	votedFor    *int       // candidateId that received vote in current term (or null if none)
 	log         []LogEntry // log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1)
@@ -75,6 +77,10 @@ type Raft struct {
 	nextIndex   []int      // for each server, index of the next log entry to send to that server (initialized to leader last log index + 1)
 	matchIndex  []int      // for each server, index of highest log entry known to be replicated on server (initialized to 0, increases monotonically)
 
+	// self defined
+	lastTimeHeard   time.Time // the last time which the peer heard from the leader
+	electionTimeout int       // the election time out
+	isLeader        bool      // whether this server is leader
 }
 
 // return currentTerm and whether this server
@@ -154,10 +160,29 @@ type RequestVoteReply struct {
 	VoteGranted bool // true means candidate received vote
 }
 
+// AppendEntries RPC arguments structure.
+// field names must start with capital letters!
+type AppendEntriesArgs struct {
+	Term         int        // leader's term
+	LeaderId     int        // so follower can redirect clients
+	PrevLogIndex int        // index of log entry immediately preceding new ones
+	PrevLogTerm  int        // term of prevLogIndex entry
+	Entries      []LogEntry // log entries to store (empty for heartbeat; may send more than one for efficiency)
+	LeaderCommit int        // leader’s commitIndex
+}
+
+// AppendEntries RPC reply structure.
+// field names must start with capital letters!
+type AppendEntriesReply struct {
+	Term    int  // currentTerm, for leader to update itself
+	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+}
+
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	// Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
@@ -174,6 +199,48 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		}
 	}
 
+}
+
+// AppendEntries RPC handler.
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	// Reply false if term < currentTerm
+	if args.Term < rf.currentTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+	}
+	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
+	if args.PrevLogIndex > len(rf.log)-1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+		reply.Term = rf.currentTerm
+		reply.Success = false
+	}
+
+	// If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it
+	conflictIndex := -1
+	for i := 0; i < len(args.Entries); i++ {
+		logIndex := args.PrevLogIndex + 1 + i
+		if logIndex <= len(rf.log)-1 && rf.log[logIndex].Term != args.Entries[i].Term {
+			conflictIndex = logIndex
+			break
+		}
+	}
+
+	if conflictIndex != -1 {
+		rf.log = rf.log[:conflictIndex] // Truncate the log from conflictIndex
+	}
+	for i := len(rf.log); i < len(args.Entries); i++ {
+		rf.log = append(rf.log, args.Entries[i])
+	}
+
+	if args.LeaderCommit > rf.commitIndex {
+		if args.LeaderCommit < len(rf.log)-1 {
+			rf.commitIndex = args.LeaderCommit
+		} else {
+			rf.commitIndex = len(rf.log) - 1
+		}
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -255,7 +322,29 @@ func (rf *Raft) ticker() {
 		// Your code here (2A)
 		// Check if a leader election should be started.
 		// Debug(dTimer, "S%d Leader, checking heartbeats", rf.me)
-
+		// if the time now is after the last heard time + election time out, then a leader election should be started.
+		if time.Now().After(rf.lastTimeHeard.Add(time.Duration(rf.electionTimeout) * time.Millisecond)) {
+			count := 1
+			for i := 0; i < len(rf.peers)-1; i++ {
+				if i != rf.me {
+					args := new(RequestVoteArgs)
+					args.Term = rf.currentTerm
+					args.CandidateId = rf.me
+					args.LastLogTerm = rf.log[len(rf.log)-1].Term
+					args.LastLogIndex = len(rf.log) - 1
+					reply := new(RequestVoteReply)
+					success := rf.sendRequestVote(i, args, reply)
+					if success {
+						if reply.VoteGranted {
+							count = count + 1
+						}
+					}
+				}
+			}
+			if count > len(rf.peers)/2 {
+				rf.isLeader = true
+			}
+		}
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
@@ -284,7 +373,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.votedFor = nil
 	rf.commitIndex = 0
 	rf.lastApplied = 0
-
+	rf.isLeader = false
+	rf.lastTimeHeard = time.Now()
+	rf.electionTimeout = rand.Int()%150 + 150
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
