@@ -357,7 +357,8 @@ func (rf *Raft) ticker() {
 			Debug(dTimer, "S%d Start Leader Election", rf.me)
 			// follower convert to candidate, current term increase
 			rf.currentTerm++
-
+			// now is candidate
+			rf.isLeader = false
 			// reset the candidate election time out
 			rf.lastTimeHeard = time.Now()
 			count := 1
