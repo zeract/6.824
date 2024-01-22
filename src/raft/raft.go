@@ -185,12 +185,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	Debug(dVote, "C%d asking for vote, T%d", args.CandidateId, args.Term)
 
-	// reset the election time out
-	rf.lastTimeHeard = time.Now()
 	// Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
+		return
 	} else {
 
 		if args.Term > rf.currentTerm {
@@ -199,15 +198,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			rf.currentTerm = args.Term
 			// term change, so the vote for candidate id need change
 			rf.votedFor = -1
+			Debug(dTerm, "S%d update term T%d", rf.me, rf.currentTerm)
 		}
 
-		Debug(dTerm, "S%d update term T%d", rf.me, rf.currentTerm)
 		// If votedFor is null or candidateId, and candidate’s log is at least as up-to-date as receiver’s log, grant vote
 		if rf.votedFor == -1 || rf.votedFor == args.CandidateId {
 			if args.LastLogTerm > rf.currentTerm || (args.LastLogTerm == rf.currentTerm && args.LastLogIndex >= rf.lastApplied) {
 				rf.votedFor = args.CandidateId
 				reply.Term = rf.currentTerm
 				reply.VoteGranted = true
+				// reset the election time out
+				rf.lastTimeHeard = time.Now()
 				Debug(dVote, "S%d Vote for S%d", rf.me, args.CandidateId)
 			}
 
@@ -225,22 +226,24 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		Debug(dLog, "S%d received heartbeat from S%d", rf.me, args.LeaderId)
 	}
 
-	// reset the election time out
-	rf.lastTimeHeard = time.Now()
 	// Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
 		Debug(dTerm, "S%d receive outdate Append RPC form S%d", rf.me, args.LeaderId)
 		reply.Term = rf.currentTerm
 		reply.Success = false
-	} else {
-		if args.Term > rf.currentTerm {
-			// paper Rules for Servers: term T > currentTerm, convert to followers
-			rf.currentTerm = args.Term
-			rf.isLeader = false
-			// term change, so the vote for candidate id need change
-			rf.votedFor = -1
-		}
+		return
 	}
+	// reset the election time out
+	rf.lastTimeHeard = time.Now()
+
+	if args.Term > rf.currentTerm {
+		// paper Rules for Servers: term T > currentTerm, convert to followers
+		rf.currentTerm = args.Term
+		rf.isLeader = false
+		// term change, so the vote for candidate id need change
+		rf.votedFor = -1
+	}
+
 	// Reply false if log doesn’t contain an entry at prevLogIndex whose term matches prevLogTerm
 	if args.PrevLogIndex > len(rf.log)-1 || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Term = rf.currentTerm
@@ -353,52 +356,80 @@ func (rf *Raft) ticker() {
 		// Check if a leader election should be started.
 		// Debug(dTimer, "S%d Leader, checking heartbeats", rf.me)
 		// if the time now is after the last heard time + election time out, then a leader election should be started.
-		if time.Now().After(rf.lastTimeHeard.Add(time.Duration(rf.electionTimeout) * time.Millisecond)) {
-			Debug(dTimer, "S%d Start Leader Election", rf.me)
+		if time.Now().After(rf.lastTimeHeard.Add(time.Duration(rf.electionTimeout)*time.Millisecond)) && !rf.isLeader {
+			Debug(dTimer, "S%d Start Leader Election at %s", rf.me, time.Now())
 			// follower convert to candidate, current term increase
 			rf.currentTerm++
 			// now is candidate
 			rf.isLeader = false
 			// reset the candidate election time out
 			rf.lastTimeHeard = time.Now()
-			count := 1
-			for i := 0; i < len(rf.peers)-1; i++ {
-				if i != rf.me {
-					args := new(RequestVoteArgs)
-					args.Term = rf.currentTerm
-					args.CandidateId = rf.me
-					if len(rf.log) != 0 {
-						args.LastLogTerm = rf.log[len(rf.log)-1].Term
-						args.LastLogIndex = len(rf.log) - 1
-					} else {
-						args.LastLogTerm = rf.currentTerm
-						args.LastLogIndex = 0
-					}
 
-					reply := new(RequestVoteReply)
-					Debug(dTimer, "C%d Send Request Vote for S%d", rf.me, i)
-					success := rf.sendRequestVote(i, args, reply)
-					if success {
-						if reply.Term > rf.currentTerm {
-							// paper Rules for Servers: term T > currentTerm, convert to followers
-							Debug(dLeader, "Leader L%d convert to Follower", rf.me)
-							rf.isLeader = false
+			rf.electionTimeout = rand.Int()%750 + 750 // 750-1500ms for election time out
+
+			// vote for self
+			rf.votedFor = rf.me
+			count := 1
+			var mu sync.Mutex
+			// Debug(dInfo, "C%d Send %d Vote RPC", rf.me, len(rf.peers))
+			for i := 0; i < len(rf.peers); i++ {
+				if i != rf.me {
+					go func(peerIndex int) {
+						Debug(dTimer, "C%d Send Request Vote for S%d", rf.me, peerIndex)
+						args := new(RequestVoteArgs)
+						args.Term = rf.currentTerm
+						args.CandidateId = rf.me
+						if len(rf.log) != 0 {
+							args.LastLogTerm = rf.log[len(rf.log)-1].Term
+							args.LastLogIndex = len(rf.log) - 1
+						} else {
+							args.LastLogTerm = rf.currentTerm
+							args.LastLogIndex = 0
 						}
-						if reply.VoteGranted {
-							count = count + 1
+
+						reply := new(RequestVoteReply)
+						// Debug(dTimer, "C%d Send Request Vote for S%d", rf.me, i)
+						success := rf.sendRequestVote(peerIndex, args, reply)
+						if success {
+							mu.Lock()
+							defer mu.Unlock()
+							if reply.Term > rf.currentTerm {
+								// paper Rules for Servers: term T > currentTerm, convert to followers
+								Debug(dLeader, "Leader L%d convert to Follower", rf.me)
+								rf.isLeader = false
+							}
+							if reply.VoteGranted {
+								count++
+								if count > len(rf.peers)/2 {
+									Debug(dLeader, "S%d Achieved Majority for T%d (%d), converting to Leader", rf.me, rf.currentTerm, count)
+									rf.isLeader = true
+								}
+							}
+						} else {
+							Debug(dTimer, "S%d Can't Send Vote Request to S%d", rf.me, peerIndex)
 						}
-					}
+					}(i)
 				}
 			}
-			if count > len(rf.peers)/2 {
-				Debug(dLeader, "S%d Achieved Majority for T%d (%d), converting to Leader", rf.me, rf.currentTerm, count)
-				rf.isLeader = true
+			// Debug(dLeader, "S%d receive %d Vote", rf.me, count)
+		}
+		// pause for a random amount of time between 50 and 150
+		// milliseconds.
+		ms := 50 + (rand.Int63() % 100)
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+	}
+}
 
-				// reset the candidate election time out
-				rf.lastTimeHeard = time.Now()
+// leader periodically sends heartbeats
+func (rf *Raft) heartbeat() {
+	for rf.killed() == false {
+		if rf.isLeader {
+			// reset the candidate election time out
+			// rf.lastTimeHeard = time.Now()
 
-				for i := 0; i < len(rf.peers)-1; i++ {
-					if i != rf.me {
+			for i := 0; i < len(rf.peers); i++ {
+				if i != rf.me {
+					go func(peerIndex int) {
 						args := new(AppendEntriesArgs)
 						reply := new(AppendEntriesReply)
 						args.Term = rf.currentTerm
@@ -410,49 +441,12 @@ func (rf *Raft) ticker() {
 							args.PrevLogIndex = 0
 							args.PrevLogTerm = rf.currentTerm
 						}
-
-						rf.peers[i].Call("Raft.AppendEntries", args, reply)
+						rf.peers[peerIndex].Call("Raft.AppendEntries", args, reply)
 						if reply.Term > rf.currentTerm {
 							// paper Rules for Servers: term T > currentTerm, convert to followers
-							Debug(dLeader, "Leader L%d convert to Follower", rf.me)
 							rf.isLeader = false
 						}
-					}
-				}
-			}
-		}
-		// pause for a random amount of time between 50 and 350
-		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
-	}
-}
-
-// leader periodically sends heartbeats
-func (rf *Raft) heartbeat() {
-	for rf.killed() == false {
-		if rf.isLeader {
-			// reset the candidate election time out
-			rf.lastTimeHeard = time.Now()
-
-			for i := 0; i < len(rf.peers)-1; i++ {
-				if i != rf.me {
-					args := new(AppendEntriesArgs)
-					reply := new(AppendEntriesReply)
-					args.Term = rf.currentTerm
-					args.LeaderId = rf.me
-					if len(rf.log) != 0 {
-						args.PrevLogIndex = len(rf.log) - 1
-						args.PrevLogTerm = rf.log[len(rf.log)-1].Term
-					} else {
-						args.PrevLogIndex = 0
-						args.PrevLogTerm = rf.currentTerm
-					}
-					rf.peers[i].Call("Raft.AppendEntries", args, reply)
-					if reply.Term > rf.currentTerm {
-						// paper Rules for Servers: term T > currentTerm, convert to followers
-						rf.isLeader = false
-					}
+					}(i)
 				}
 			}
 		}
@@ -484,7 +478,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.isLeader = false
 	rf.lastTimeHeard = time.Now()
-	rf.electionTimeout = rand.Int()%200 + 800 // 800-1000ms for election time out
+	rf.electionTimeout = rand.Int()%750 + 750 // 1000-1500ms for election time out
+	Debug(dInfo, "S%d initial election time out is %dms", rf.me, rf.electionTimeout)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
