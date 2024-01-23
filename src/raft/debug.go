@@ -53,10 +53,10 @@ func init() {
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 }
 
-const debug = 1
+// const debug = debugVerbosity
 
 func Debug(topic logTopic, format string, a ...interface{}) {
-	if debug >= 1 {
+	if debugVerbosity >= 1 {
 		time := time.Since(debugStart).Microseconds()
 		time /= 100
 		prefix := fmt.Sprintf("%06d %v ", time, string(topic))

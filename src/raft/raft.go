@@ -90,6 +90,8 @@ func (rf *Raft) GetState() (int, bool) {
 	var term int
 	var isleader bool
 	// Your code here (2A).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	term = rf.currentTerm
 	isleader = rf.isLeader
 	return term, isleader
@@ -354,7 +356,8 @@ func (rf *Raft) ticker() {
 
 		// Your code here (2A)
 		// Check if a leader election should be started.
-		// Debug(dTimer, "S%d Leader, checking heartbeats", rf.me)
+		rf.mu.Lock()
+		// fmt.Printf("rf.mu: %v\n", rf.mu)
 		// if the time now is after the last heard time + election time out, then a leader election should be started.
 		if time.Now().After(rf.lastTimeHeard.Add(time.Duration(rf.electionTimeout)*time.Millisecond)) && !rf.isLeader {
 			Debug(dTimer, "S%d Start Leader Election at %s", rf.me, time.Now())
@@ -369,21 +372,23 @@ func (rf *Raft) ticker() {
 
 			// vote for self
 			rf.votedFor = rf.me
+			// copy of rf.currentTerm
+			currentTerm := rf.currentTerm
+			rf.mu.Unlock()
 			count := 1
-			var mu sync.Mutex
 			// Debug(dInfo, "C%d Send %d Vote RPC", rf.me, len(rf.peers))
 			for i := 0; i < len(rf.peers); i++ {
 				if i != rf.me {
 					go func(peerIndex int) {
 						Debug(dTimer, "C%d Send Request Vote for S%d", rf.me, peerIndex)
 						args := new(RequestVoteArgs)
-						args.Term = rf.currentTerm
+						args.Term = currentTerm
 						args.CandidateId = rf.me
 						if len(rf.log) != 0 {
 							args.LastLogTerm = rf.log[len(rf.log)-1].Term
 							args.LastLogIndex = len(rf.log) - 1
 						} else {
-							args.LastLogTerm = rf.currentTerm
+							args.LastLogTerm = currentTerm
 							args.LastLogIndex = 0
 						}
 
@@ -391,8 +396,9 @@ func (rf *Raft) ticker() {
 						// Debug(dTimer, "C%d Send Request Vote for S%d", rf.me, i)
 						success := rf.sendRequestVote(peerIndex, args, reply)
 						if success {
-							mu.Lock()
-							defer mu.Unlock()
+
+							rf.mu.Lock()
+							defer rf.mu.Unlock()
 							if reply.Term > rf.currentTerm {
 								// paper Rules for Servers: term T > currentTerm, convert to followers
 								Debug(dLeader, "Leader L%d convert to Follower", rf.me)
@@ -412,7 +418,10 @@ func (rf *Raft) ticker() {
 				}
 			}
 			// Debug(dLeader, "S%d receive %d Vote", rf.me, count)
+		} else {
+			rf.mu.Unlock()
 		}
+
 		// pause for a random amount of time between 50 and 150
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 100)
@@ -423,33 +432,41 @@ func (rf *Raft) ticker() {
 // leader periodically sends heartbeats
 func (rf *Raft) heartbeat() {
 	for rf.killed() == false {
+		rf.mu.Lock()
 		if rf.isLeader {
 			// reset the candidate election time out
 			// rf.lastTimeHeard = time.Now()
-
+			currentTerm := rf.currentTerm
+			rf.mu.Unlock()
 			for i := 0; i < len(rf.peers); i++ {
 				if i != rf.me {
 					go func(peerIndex int) {
 						args := new(AppendEntriesArgs)
 						reply := new(AppendEntriesReply)
-						args.Term = rf.currentTerm
+						args.Term = currentTerm
 						args.LeaderId = rf.me
 						if len(rf.log) != 0 {
 							args.PrevLogIndex = len(rf.log) - 1
 							args.PrevLogTerm = rf.log[len(rf.log)-1].Term
 						} else {
 							args.PrevLogIndex = 0
-							args.PrevLogTerm = rf.currentTerm
+							args.PrevLogTerm = currentTerm
 						}
 						rf.peers[peerIndex].Call("Raft.AppendEntries", args, reply)
-						if reply.Term > rf.currentTerm {
+						rf.mu.Lock()
+
+						if reply.Term > currentTerm {
 							// paper Rules for Servers: term T > currentTerm, convert to followers
 							rf.isLeader = false
 						}
+						rf.mu.Unlock()
 					}(i)
 				}
 			}
+		} else {
+			rf.mu.Unlock()
 		}
+
 		// The tester requires that the leader send heartbeat RPCs no more than ten times per second.
 		time.Sleep(time.Duration(125) * time.Millisecond)
 	}
