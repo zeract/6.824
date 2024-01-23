@@ -360,6 +360,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.log = append(rf.log, LogEntry{command, term})
 	count := 1
 	commited := false
+	index = len(rf.log) - 1
 	rf.mu.Unlock()
 	for i := 0; i < len(rf.peers); i++ {
 		if i != rf.me {
@@ -392,7 +393,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 				if count > len(rf.peers)/2 && !commited {
 					commited = true
 					rf.commitIndex++
-					index = rf.commitIndex
+					// index = rf.commitIndex
 					for rf.commitIndex > rf.lastApplied {
 						rf.lastApplied++
 						// Send each newly committed entry on applyCh on each peer
@@ -408,9 +409,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			}(i)
 		}
 	}
-	for !commited {
-		time.Sleep(10 * time.Millisecond)
-	}
+
 	return index, term, isLeader
 }
 
