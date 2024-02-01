@@ -220,9 +220,10 @@ type AppendEntriesReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	// Debug(dVote, "C%d asking for vote, T%d", args.CandidateId, args.Term)
+	Debug(dVote, "S%d asking S%d for vote, T%d", args.CandidateId, rf.me, args.Term)
 	// rf.readPersist(rf.persister.ReadRaftState())
 	// Reply false if term < currentTerm
 	if args.Term < rf.currentTerm {
@@ -382,7 +383,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	Debug(dLog, "S%d Call Request Vote for S%d", args.CandidateId, server)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	if ok {
+		Debug(dLog, "S%d -> S%d Vote Finish", args.CandidateId, server)
+	}
+
 	return ok
 }
 
@@ -459,7 +465,7 @@ func (rf *Raft) ticker() {
 			// reset the candidate election time out
 			rf.lastTimeHeard = time.Now()
 
-			rf.electionTimeout = rand.Int()%200 + 200 // 750-1500ms for election time out
+			rf.electionTimeout = rand.Int()%200 + 600 // 750-1500ms for election time out
 			// rf.readPersist(rf.persister.ReadRaftState())
 			// vote for self
 			rf.votedFor = rf.me
@@ -715,7 +721,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.lastApplied = 0
 	rf.state = Follower
 	rf.lastTimeHeard = time.Now()
-	rf.electionTimeout = rand.Int()%200 + 200 // 1000-1500ms for election time out
+	rf.electionTimeout = rand.Int()%200 + 600 // 1000-1500ms for election time out
 	rf.log = append(rf.log, LogEntry{nil, 0}) // the log need start from index 1
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.nextIndex = make([]int, len(rf.peers))
